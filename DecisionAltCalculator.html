@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Decision Altitude Optimizer</title>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+
+<style>
+
+body{
+    margin:0;
+    font-family:Arial;
+    background:#f0f0f0;
+}
+
+.container{
+    display:grid;
+    grid-template-columns:380px 1fr;
+    height:100vh;
+}
+
+.sidebar{
+    background:white;
+    overflow-y:auto;
+    padding:20px;
+    border-right:1px solid #ccc;
+}
+
+.content{
+    overflow-y:auto;
+    padding:20px;
+}
+
+.card{
+    background:white;
+    padding:20px;
+    border-radius:10px;
+    margin-bottom:20px;
+    box-shadow:0 2px 10px rgba(0,0,0,0.08);
+}
+
+label{
+    display:block;
+    margin-top:12px;
+    font-weight:bold;
+}
+
+input{
+    width:100%;
+    padding:8px;
+    margin-top:4px;
+    border-radius:6px;
+    border:1px solid #aaa;
+    box-sizing:border-box;
+}
+
+button{
+    width:100%;
+    margin-top:20px;
+    padding:14px;
+    border:none;
+    border-radius:8px;
+    background:#1565c0;
+    color:white;
+    font-size:16px;
+    cursor:pointer;
+}
+
+button:hover{
+    background:#0d47a1;
+}
+
+.grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:12px;
+}
+
+.resultBox{
+    background:#f7f7f7;
+    padding:12px;
+    border-radius:8px;
+}
+
+.plot{
+    height:500px;
+}
+
+pre{
+    background:#111;
+    color:#0f0;
+    padding:15px;
+    border-radius:8px;
+    overflow:auto;
+}
+
+textarea{
+    width:100%;
+    height:500px;
+    font-family:monospace;
+    font-size:14px;
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="sidebar">
+
+<h2>Decision Altitude Inputs</h2>
+
+<label>Stall Speed</label>
+<input id="v_stall" value="53">
+
+<label>L/D Max Speed</label>
+<input id="v_ldmax" value="68">
+
+<label>Climb Speed</label>
+<input id="v_climb" value="74">
+
+<label>Thrust</label>
+<input id="thrust" value="500">
+
+<label>L/D Max</label>
+<input id="ld_max" value="9">
+
+<label>Weight Max</label>
+<input id="weight_max" value="2550">
+
+<label>Current Weight</label>
+<input id="weight" value="2260.3">
+
+<label>Landing Distance</label>
+<input id="landing_distance" value="1000">
+
+<label>Takeoff Distance</label>
+<input id="takeoff_distance" value="1500">
+
+<label>Runway Length</label>
+<input id="runway" value="4000">
+
+<label>Wind X</label>
+<input id="wind_x" value="-10">
+
+<label>Climb Rate (FPM)</label>
+<input id="climb_rate" value="800">
+
+<label>Reaction Time</label>
+<input id="reaction_time" value="5">
+
+<label>Max Bank</label>
+<input id="bank_max" value="45">
+
+<label>Max AoA</label>
+<input id="aoa_max" value="0.75">
+
+<label>Altitude Buffer</label>
+<input id="alt_buffer" value="100">
+
+<button onclick="runPythonCode()">
+Run Optimization
+</button>
+
+<div id="status" style="margin-top:20px;font-weight:bold;">
+Loading Pyodide...
+</div>
+
+</div>
+
+<div class="content">
+
+<div class="card">
+
+<h2>Optimization Results</h2>
+
+<div class="grid">
+
+<div class="resultBox">
+<b>Decision Altitude</b><br>
+<span id="decAlt">-</span>
+</div>
+
+</div>
+
+</div>
+
+<div class="card">
+
+<h2>Python Code</h2>
+
+<textarea id="pythonCode">
+
+climb_gradients = (climb_rates * 60) / (v_climb * 6076)
+
+def AeroForcesSetup2(v_stall, v_ldmax, ld_max, weight, S=1.0, rho=1.0):
+    # lift calculation
+    cl_stall = 2 * weight / (rho * S * v_stall**2)
+
+    cl0 = 0
+    cl1 = cl_stall
+
+    # Drag Calculation
+    cl_ldmax = 2 * weight / (rho * S * v_ldmax**2)
+
+    a_ldmax = (cl_ldmax - cl0) / cl1
+
+    # k calculation - carefully translate the Matlab expression
+    k_denominator = (cl1**3 * a_ldmax**2 + 2 * cl0 * cl1**2 * a_ldmax + cl0**2 * cl1 + cl1 * cl_ldmax**2)
+    # Ensure k_denominator is not zero to avoid division by zero
+    if k_denominator == 0:
+        # Handle this case, e.g., by returning default values or raising an error
+        # For now, let's assume valid inputs prevent this.
+        pass # Or set k to a safe value like 0 if division by zero is possible and acceptable
+
+    k = (cl1 * cl_ldmax) / (ld_max * k_denominator)
+
+    Cd0_base = (cl_ldmax / ld_max) - k * cl_ldmax**2
+    cd0 = Cd0_base + k * cl0**2
+    cd1 = 2 * k * cl0 * cl1
+    cd2 = k * cl1**2
+
+    return cl0, cl1, cd0, cd1, cd2
+    
+    import numpy as np
+
+def sind(x): return np.sin(np.deg2rad(x))
+def cosd(x): return np.cos(np.deg2rad(x))
+
+def myObjective(Z, P):
+    # cost = Z[len(Z)-9] + P['ld_max'] * Z[len(Z)-7] # Use this for TCCC (Matlab Z(end-8) -> Python Z[len(Z)-9], Z(end-6) -> Z[len(Z)-7])
+    cost = -Z[1] # Matlab Z(2) -> Python Z[1] for decision altitude
+    return cost
+
+def myConstraint(Z_flat_full, P):
+    # Unpack parameters
+    N = P['N']
+    Nx = P['Nx']
+    Nv = P['Nv']
+    No = P['No']
+    Nr = P['Nr']
+    Tr = P['Tr']
+    dt_P = P['dt'] # Renamed to avoid conflict with local 'dt' calculation
+    wind = P['wind']
+    rho = P['rho']
+    g = P['g']
+    cl0, cl1 = P['cl0'], P['cl1']
+    cd0, cd1, cd2 = P['cd0'], P['cd1'], P['cd2']
+    S = P['S']
+    m = P['m']
+    # vf = P['vf'] # Not used in the provided Matlab code for this section
+    # s_max = P['s_max'] # Not used in the provided Matlab code for this section
+    # v_stall = P['v_stall'] # Not used in the provided Matlab code for this section
+
+    # Constants
+    kn_fps = 1.6878
+    fps_kn = 1.0 / kn_fps
+
+    # Intermediate: Matlab Z(1) is Z_flat_full[0], Z(No+1:end) is Z_flat_full[No:]
+    s = Z_flat_full[0]
+    Z_states_flat = Z_flat_full[No:] # This is the flattened state vector from Z_opt
+
+    # Extract state and control variables from the flattened state vector
+    # Matlab: Z(idx:Nv:end,1) where Z is (Nv, N) matrix or a flattened array in column-major
+    # Python: Z_states_flat[idx-1::Nv] where idx is 1-based index from Matlab state definition
+    x = Z_states_flat[0::Nv]
+    y = Z_states_flat[1::Nv]
+    z = Z_states_flat[2::Nv] # Note: Matlab uses z for negative altitude, but the variable is named 'z'
+    vx = Z_states_flat[3::Nv]
+    vy = Z_states_flat[4::Nv]
+    vz = Z_states_flat[5::Nv]
+
+    bank = Z_states_flat[6::Nv]
+    aoa = Z_states_flat[7::Nv]
+    thrust = Z_states_flat[8::Nv]
+
+    # Calculate intermediate values for dynamics
+    v = np.sqrt(vx**2 + vy**2 + vz**2 + 1e-6) # Added small epsilon to prevent sqrt of zero
+    cl = cl0 + cl1 * aoa
+    cd = cd0 + cd1 * aoa + cd2 * aoa**2
+    L = 0.5 * rho * v**2 * cl * S
+    D = 0.5 * rho * v**2 * cd * S
+
+    # State derivatives (dx, dy, dz)
+    dx = kn_fps * (vx + wind[0]) # Matlab wind(1) -> Python wind[0]
+    dy = kn_fps * (vy + wind[1])
+    dz = kn_fps * (vz + wind[2])
+
+    # Body frame axial thrust
+    ax_thrust_b = (1.0 / m) * thrust * g
+
+    # Wind frame accelerations
+    ax_w = cosd(20 * aoa - 5) * ax_thrust_b - (1.0 / m) * D * g
+    az_w = -sind(20 * aoa - 5) * ax_thrust_b - (1.0 / m) * L * g
+
+    # Heading and Climb Angle in degrees
+    heading = np.rad2deg(np.arctan2(vy, vx + 1e-6)) # Added small epsilon for safety
+    climb_angle = np.rad2deg(np.arctan2(vz, np.sqrt(vx**2 + vy**2) + 1e-6)) # Added small epsilon for safety
+
+    # Inertial frame accelerations (ax, ay, az)
+    az_inertial = fps_kn * (sind(climb_angle) * ax_w + cosd(climb_angle) * cosd(bank) * az_w + g)
+    ay_inertial = fps_kn * (sind(heading) * cosd(climb_angle) * ax_w + (-sind(heading) * sind(climb_angle) * cosd(bank) + cosd(heading) * sind(bank)) * az_w)
+    ax_inertial = fps_kn * (cosd(heading) * cosd(climb_angle) * ax_w + (-cosd(heading) * sind(climb_angle) * cosd(bank) - sind(heading) * sind(bank)) * az_w)
+
+    # Reshaping Xdot and X (as in Matlab's column-major flattening)
+    X_flat = np.vstack([x, y, z, vx, vy, vz]).reshape((N * Nx), order='F') # Flatten to 1D, column-major
+    Xdot_flat = np.vstack([dx, dy, dz, ax_inertial, ay_inertial, az_inertial]).reshape((N * Nx), order='F') # Flatten to 1D, column-major
+
+    # Equality Constraints (ceq)
+    # Initialize ceq with the s*dt_P part
+    dt = 1/(N-Nr-1)
+    dt_P = dt
+
+    ceq = X_flat[Nx:] - X_flat[:-Nx] - 0.5 * s * dt_P * (Xdot_flat[Nx:] + Xdot_flat[:-Nx])
+
+    # Overwrite the initial part of ceq with the Tr/Nr dt if Nr > 0
+    num_elements_to_overwrite = Nx * Nr - Nx
+
+    if num_elements_to_overwrite > 0: # Only perform overwrite if there are positive elements
+        # Matlab: ceq(1:Nx*Nr-Nx) = X(Nx + 1:Nx*Nr) - X(1:Nx*Nr - Nx) - 0.5*(Tr/Nr)*Xdot(Nx + 1:Nx*Nr) - 0.5*(Tr/Nr)*Xdot(1:Nx*Nr - Nx);
+
+        ceq_overwrite_part = X_flat[Nx:Nx*Nr] - X_flat[:Nx*Nr-Nx] - \
+                             0.5 * (Tr/Nr) * (Xdot_flat[Nx:Nx*Nr] + Xdot_flat[:Nx*Nr-Nx])
+
+        ceq[:Nx*Nr-Nx] = ceq_overwrite_part
+
+
+    # Inequality Constraints (cineq)
+    cineq = [] # No explicit inequality constraints provided in the Matlab code
+
+    return cineq, ceq
+    
+import numpy as np
+from scipy.io import loadmat
+from scipy.optimize import minimize
+
+# Environment variables (as per Matlab snippet)
+g = 32.174
+S = 1
+rho = 1
+
+# Aerodynamic calculations (as per Matlab snippet)
+cl0, cl1, cd0, cd1, cd2 = AeroForcesSetup2(v_stall, v_ldmax, ld_max, weight_max, S, rho)
+
+climb_angle = np.arctan(climb_gradients)
+L_climb = (weights - thrust_param * np.sin(climb_angle)) / np.cos(climb_angle)
+cl_climb = 2 * L_climb / (rho * S * v_climb**2)
+a_climb = (cl_climb - cl0) / cl1
+
+# Problem setup
+Nx, Nu, No = 6, 3, 2
+Nv = Nx + Nu
+N, Nr = 41, 6
+dt = 1 / (N - Nr - 1)
+s_max = 120
+
+# Load the initial trajectory from the .mat file
+#mat_data = loadmat('/content/decision_alt_init.mat')
+#z0 = mat_data['Zf'].flatten()
+
+# User defined initial and final states
+x0_vec = np.array([3000, 0, -300, 75, 51, -25])
+xf_vec = np.array([2000, 0, -100, -53, 0, 0])
+u0_vec = np.array([1, 0.5, 0])
+
+# Create linspace for interpolation (column-wise for each state)
+interpolation = np.zeros((Nx, N))
+for i in range(Nx):
+    interpolation[i, :] = np.linspace(x0_vec[i], xf_vec[i], N)
+
+# Create controls (constant throughout initial guess)
+controls = np.tile(u0_vec.reshape(-1, 1), (1, N))
+
+# Combine states and controls into (Nv, N) matrix
+Z0_matrix = np.vstack([interpolation, controls])
+
+# Flatten to 1D (using column-major 'F' to match the solver's expectations)
+z0_states = Z0_matrix.flatten(order='F')
+
+# Prepend the extra states (s and decision altitude guess)
+# Matlab: Z0 = [s_max/2; 0; reshape(Z0, [N*Nv, 1])]
+z0 = np.concatenate(([s_max / 2, 0], z0_states))
+
+# Inequality constraints setup
+Ni = N + 3
+Aineq = np.zeros((Ni, N * Nv + No))
+bineq = np.zeros(Ni)
+for i in range(N):
+    Aineq[i, No + i * Nv + 2] = 1
+    bineq[i] = -alt_buffer
+
+Aineq[Ni - 3, -6] = 1
+bineq[Ni - 3] = 1
+Aineq[Ni - 2, -9] = 1
+bineq[Ni - 2] = runways
+Aineq[Ni - 1, -9] = -1
+bineq[Ni - 1] = -landing_distance
+
+# Equality Constraints setup
+Ne = 9
+Aeq = np.zeros((Ne + 2 * Nr, N * Nv + No))
+Aeq[0, 1] = 1 / climb_gradients
+Aeq[0, No] = 1
+Aeq[1, No + 1] = 1
+Aeq[2, No + 2] = 1
+Aeq[2, 1] = -1
+Aeq[3, No + 3] = 1
+Aeq[4, No + 4] = 1
+Aeq[5, No + 5] = 1
+
+for i in range(Nr):
+    Aeq[Ne + 2 * i, No + (i+1) * Nv - 3] = 1
+    Aeq[Ne + 2 * i + 1, No + (i+1) * Nv - 2] = 1
+
+Aeq[6, -8] = 1
+Aeq[7, -5] = 1
+Aeq[8, -4] = 1
+
+beq = np.zeros(Ne + 2 * Nr)
+beq[0] = takeoff_distance
+beq[3] = v_climb * np.cos(np.arctan(climb_gradients))
+beq[4] = -1
+beq[5] = -v_climb * np.sin(np.arctan(climb_gradients))
+for i in range(Nr):
+    beq[Ne + 2 * i + 1] = a_climb
+
+# Bounds
+low_b = [20, -5000] + [-100000, -100000, -100000, -1000, -1000, -1000, -bank_max, 0.0, 0] * N
+upp_b = [s_max, 0] + [100000, 100000, 100000, 1000, 1000, 1000, bank_max, aoa_max, 0] * N
+bounds = list(zip(low_b, upp_b))
+
+# Calculate aerodynamic coefficients for the dictionary
+cl0, cl1, cd0, cd1, cd2 = AeroForcesSetup2(
+    v_stall=v_stall,
+    v_ldmax=v_ldmax,
+    ld_max=ld_max,
+    weight=weight_max,
+    S=1.0,
+    rho=1.0
+)
+
+# Time step calculation
+# N: number of collocation points, Nr: points during reaction time
+dt_val = 1 / (N - Nr - 1)
+
+# Define the central parameter dictionary P
+P = {
+    'N': N,
+    'Nx': Nx,
+    'Nu': 3,           # bank, aoa, thrust
+    'Nv': Nv,
+    'No': No,
+    'Nr': Nr,
+    'Tr': t_reaction,            # Reaction time in seconds
+    'dt': dt_val,
+    'wind': np.array(winds),
+    'rho': 1.0,         # Air density (slugs/ft^3)
+    'g': 32.174,        # Gravity (ft/s^2)
+    'cl0': cl0,
+    'cl1': cl1,
+    'cd0': cd0,
+    'cd1': cd1,
+    'cd2': cd2,
+    'S': 1.0,           # Wing surface area (ft^2)
+    'm': weights,       # Mass/Weight used for dynamics
+    'thrust_max': thrust_param,
+    'vf': v_ldmax,
+    'ld_max': ld_max,
+    's_max': 120.0,
+    'v_stall': v_stall
+}
+
+# Define constraints for scipy
+def linear_eq_cons(Z): return Aeq @ Z - beq
+
+cons = [
+    {'type': 'eq', 'fun': linear_eq_cons},
+    {'type': 'eq', 'fun': lambda Z: myConstraint(Z, P)[1]},
+    {'type': 'ineq', 'fun': lambda Z: bineq - Aineq @ Z}
+]
+
+result = minimize(myObjective, z0, args=(P,), method='SLSQP', bounds=bounds, constraints=cons, tol=1e-10, options={'maxiter': 5000, 'ftol': 1e-10, 'disp': True})
+
+
+</textarea>
+
+<pre id="pythonOutput"></pre>
+
+</div>
+
+</div>
+
+</div>
+
+<script>
+
+let pyodide;
+
+async function initPyodide(){
+
+    pyodide = await loadPyodide();
+
+    await pyodide.loadPackage(["numpy","scipy"]);
+
+    document.getElementById("status").innerHTML =
+        "Pyodide Ready";
+
+}
+
+initPyodide();
+
+async function runPythonCode(){
+
+    const output =
+        document.getElementById("pythonOutput");
+
+    output.textContent =
+        "Running optimization...";
+
+    document.getElementById("status").innerHTML =
+        "Running optimization...";
+
+    try{
+
+        const inputs = {
+
+            v_stall:
+                parseFloat(document.getElementById("v_stall").value),
+
+            v_ldmax:
+                parseFloat(document.getElementById("v_ldmax").value),
+
+            v_climb:
+                parseFloat(document.getElementById("v_climb").value),
+
+            thrust_param:
+                parseFloat(document.getElementById("thrust").value),
+
+            ld_max:
+                parseFloat(document.getElementById("ld_max").value),
+
+            weight_max:
+                parseFloat(document.getElementById("weight_max").value),
+
+            weights:
+                parseFloat(document.getElementById("weight").value),
+
+            landing_distance:
+                parseFloat(document.getElementById("landing_distance").value),
+
+            takeoff_distance:
+                parseFloat(document.getElementById("takeoff_distance").value),
+
+            runways:
+                parseFloat(document.getElementById("runway").value),
+
+            winds: [
+                parseFloat(document.getElementById("wind_x").value),
+                0,
+                0
+            ],
+
+            climb_rates:
+                parseFloat(document.getElementById("climb_rate").value),
+
+            t_reaction:
+                parseFloat(document.getElementById("reaction_time").value),
+
+            bank_max:
+                parseFloat(document.getElementById("bank_max").value),
+
+            aoa_max:
+                parseFloat(document.getElementById("aoa_max").value),
+
+            alt_buffer:
+                parseFloat(document.getElementById("alt_buffer").value)
+
+        };
+
+let code = `
+v_stall = ${inputs.v_stall}
+v_ldmax = ${inputs.v_ldmax}
+v_climb = ${inputs.v_climb}
+thrust_param = ${inputs.thrust_param}
+ld_max = ${inputs.ld_max}
+weight_max = ${inputs.weight_max}
+weights = ${inputs.weights}
+landing_distance = ${inputs.landing_distance}
+takeoff_distance = ${inputs.takeoff_distance}
+runways = ${inputs.runways}
+climb_rates = ${inputs.climb_rates}
+t_reaction = ${inputs.t_reaction}
+bank_max = ${inputs.bank_max}
+aoa_max = ${inputs.aoa_max}
+alt_buffer = ${inputs.alt_buffer}
+
+winds = [${inputs.winds[0]},0,0]
+`
++ document.getElementById("pythonCode").value
++ `
+
+decision_altitude = -result.x[1]
+
+f"{decision_altitude:.1f} ft"
+`;
+
+        const pyResult =
+            await pyodide.runPythonAsync(code);
+
+        const decisionAltitude =
+            String(pyResult);
+
+        output.textContent =
+            decisionAltitude;
+
+        document.getElementById("decAlt").innerHTML =
+            decisionAltitude;
+
+        document.getElementById("status").innerHTML =
+            "Optimization Complete";
+
+    }
+    catch(err){
+
+        console.error(err);
+
+        output.textContent =
+            err.toString();
+
+        document.getElementById("status").innerHTML =
+            "ERROR";
+    }
+}
+
+</script>
+
+</body>
+</html>
